@@ -73,10 +73,10 @@ class EDTTemperatureStrategy(TemperatureStrategy):
         h_norm = h / self._max_entropy if self._max_entropy > 0 else 0.0
 
         # Power-law scaling.
-        temp = config.edt_base_temp * (h_norm**config.edt_exponent)
+        raw_temp = config.edt_base_temp * (h_norm**config.edt_exponent)
 
         # Clamp to configured bounds.
-        temp = max(config.edt_min_temp, min(config.edt_max_temp, temp))
+        temp = max(config.edt_min_temp, min(config.edt_max_temp, raw_temp))
 
         return TemperatureResult(
             temperature=temp,
@@ -84,7 +84,7 @@ class EDTTemperatureStrategy(TemperatureStrategy):
             diagnostics={
                 "strategy": "edt",
                 "h_norm": h_norm,
-                "pre_clamp_temp": config.edt_base_temp * (h_norm**config.edt_exponent),
+                "pre_clamp_temp": raw_temp,
                 "vocab_size": self._vocab_size,
             },
         )

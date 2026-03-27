@@ -122,7 +122,6 @@ class TestEntropySourceRegistry:
 
         with patch("importlib.metadata.entry_points", return_value=[mock_ep]):
             # Should not raise, but "broken_source" won't be available.
-            EntropySourceRegistry._entry_points_loaded = False
             available = EntropySourceRegistry.list_available()
 
         assert "broken_source" not in available

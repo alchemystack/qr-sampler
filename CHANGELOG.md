@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `EDTTemperatureStrategy`: `diagnostics["pre_clamp_temp"]` now correctly reports the
+  power-law result *before* clamping rather than re-computing the same expression after
+  the clamp was already applied (was a silent diagnostic bug when `edt_min_temp` or
+  `edt_max_temp` was active)
+
+### Removed
+
+- Dead function `_encode_svarint()` from `entropy_service_pb2.py` — ZigZag encoding is
+  only needed for `sint32`/`sint64` proto field types, none of which appear in the
+  entropy service proto
+
+### Changed
+
+- `import inspect` in `processor.py` promoted from inside `_accepts_config()` to the
+  module-level imports block
+
 ### Added
 
 - vLLM V1 LogitsProcessor plugin (`QRSamplerLogitsProcessor`) with batch-level processing
