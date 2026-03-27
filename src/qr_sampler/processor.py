@@ -15,6 +15,7 @@ separate instances for different sampling strategies.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -66,8 +67,6 @@ def _accepts_config(cls: type) -> bool:
     Returns:
         True if the constructor expects a config argument.
     """
-    import inspect
-
     try:
         sig = inspect.signature(cls)
     except (ValueError, TypeError):

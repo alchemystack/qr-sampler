@@ -40,20 +40,6 @@ def _encode_varint(value: int) -> bytes:
     return bytes(parts)
 
 
-def _encode_svarint(value: int) -> bytes:
-    """Encode a signed integer using ZigZag + varint (for sint32/sint64).
-
-    Args:
-        value: Signed integer to encode.
-
-    Returns:
-        ZigZag + LEB128-encoded bytes.
-    """
-    # ZigZag encoding: (n << 1) ^ (n >> 63) for 64-bit
-    zigzag = (value << 1) ^ (value >> 63)
-    return _encode_varint(zigzag)
-
-
 def _decode_varint(data: bytes, offset: int) -> tuple[int, int]:
     """Decode a varint from bytes at the given offset.
 
