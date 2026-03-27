@@ -1,0 +1,51 @@
+id: openentropy
+name: "OpenEntropy"
+description: |
+  Local hardware entropy via the OpenEntropy library.
+
+  OpenEntropy (https://github.com/amenti-labs/openentropy) harvests entropy
+  from up to 63 hardware noise sources on the local machine -- thermal sensors,
+  CPU timing jitter, memory timing, GPU scheduling, microarchitectural state,
+  and more. No network, no API keys, no gRPC server needed.
+
+  This is a strong choice for consciousness-research experiments when a
+  dedicated QRNG device is not available. The entropy is derived from physical
+  hardware processes on the local machine.
+
+  Install:
+    pip install qr-sampler[openentropy]
+    # or: pip install openentropy
+
+  Configuration:
+    QR_ENTROPY_SOURCE_TYPE=openentropy
+    QR_OE_CONDITIONING=raw          # raw | vonneumann | sha256
+
+  Conditioning modes:
+    raw          -- Unprocessed hardware entropy (research default). Preserves
+                    the original statistical properties of the hardware sources.
+    vonneumann   -- Von Neumann debiasing. Removes first-order bias at the cost
+                    of ~50% throughput reduction.
+    sha256       -- SHA-256 whitening. Produces uniform output but destroys the
+                    original statistical signature of the hardware sources.
+
+  List available sources on your machine:
+    from openentropy import detect_available_sources
+    print([s["name"] for s in detect_available_sources()])
+
+  To sample from specific sources only:
+    QR_OE_SOURCES=clock_jitter,dram_row_buffer
+
+source_class: "qr_sampler.entropy.openentropy:OpenEntropySource"
+transport: local
+
+dependencies:
+  - openentropy
+
+compatible_amplifiers:
+  - zscore_mean
+  - ecdf
+
+known_incompatible_amplifiers: []
+
+defaults:
+  oe_conditioning: raw

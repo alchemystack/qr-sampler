@@ -12,12 +12,12 @@ Thank you for your interest in contributing to qr-sampler. This document covers 
 ### Install
 
 ```bash
-git clone https://github.com/qr-sampler/qr-sampler.git
+git clone https://github.com/alchemystack/qr-sampler.git
 cd qr-sampler
 pip install -e ".[dev]"
 ```
 
-This installs the package in editable mode with all development dependencies (pytest, ruff, mypy, scipy, pre-commit, bandit, gRPC).
+This installs the package in editable mode with all development dependencies (pytest, ruff, mypy, scipy, pre-commit, bandit, gRPC, click, jinja2).
 
 ### Pre-commit hooks
 
@@ -40,6 +40,12 @@ pytest tests/test_temperature/ -v
 pytest tests/test_selection/ -v
 pytest tests/test_logging/ -v
 pytest tests/test_entropy/ -v
+pytest tests/test_processor.py -v
+pytest tests/test_statistical_properties.py -v
+pytest tests/test_core/ -v
+pytest tests/test_engines/ -v
+pytest tests/test_profiles/ -v
+pytest tests/test_cli/ -v
 
 # With coverage
 pytest tests/ -v --cov=src/qr_sampler --cov-report=term-missing
@@ -78,9 +84,10 @@ bandit -r src/
 - **Line length** — 100 characters (configured in `pyproject.toml`)
 - **Errors** — custom exception hierarchy rooted in `QRSamplerError`. Never catch bare `Exception` (health checks are the sole exception with `# noqa` comments).
 - **No `print()`** — use `logging.getLogger("qr_sampler")` for all output
-- **No global mutable state** outside processor instances and module-load registries
-- **Frozen dataclasses** for all result types (`AmplificationResult`, `TemperatureResult`, `SelectionResult`, `TokenSamplingRecord`)
+- **No global mutable state** outside processor/adapter instances and module-load registries
+- **Frozen dataclasses** for all result types (`AmplificationResult`, `TemperatureResult`, `SelectionResult`, `TokenSamplingRecord`, `SamplingResult`)
 - **`__slots__`** on frozen dataclasses in the hot path
+- **Pydantic `ConfigDict(frozen=True)`** for profile schemas and config models
 
 ## Architecture invariants
 
@@ -88,9 +95,9 @@ These are fundamental design rules. Do not break them:
 
 1. **No hardcoded values.** Every numeric constant traces to a `QRSamplerConfig` field. Mathematical constants (e.g., `sqrt(2)`) are acceptable.
 
-2. **Registry pattern for all strategies.** New `EntropySource`, `SignalAmplifier`, or `TemperatureStrategy` implementations are registered via decorators. No if/else chains for strategy selection.
+2. **Registry pattern for all strategies.** New `EntropySource`, `SignalAmplifier`, `TemperatureStrategy`, or `EngineAdapter` implementations are registered via decorators. No if/else chains for strategy selection.
 
-3. **ABCs define contracts.** All concrete implementations subclass the relevant ABC. The processor and factory only reference abstract types.
+3. **ABCs define contracts.** All concrete implementations subclass the relevant ABC. The pipeline and adapters only reference abstract types.
 
 4. **SEM is derived, never stored.** Standard error of mean = `population_std / sqrt(sample_count)`, computed at amplification time.
 
@@ -98,7 +105,24 @@ These are fundamental design rules. Do not break them:
 
 6. **Just-in-time entropy.** Physical entropy generation must occur only when `get_random_bytes()` is called — after logits are available. No pre-buffering.
 
+7. **The core pipeline has zero engine dependencies.** `qr_sampler.core` is importable and functional without vLLM, torch, MLX, or any engine package. Only numpy and runtime deps are used.
+
+8. **Engine adapters are thin wrappers.** They convert logits to numpy, call `SamplingPipeline.sample_token()`, convert the result back to engine-native tensors, and force one-hot logits. No sampling math in adapters.
+
+9. **Profiles are declarative data, not code.** Profile YAML files are for CLI validation and documentation only. Missing or corrupt profiles never cause sampling failure.
+
 ## Adding new components
+
+### New engine adapter
+
+1. Create a class in `src/qr_sampler/engines/` subclassing `EngineAdapter`
+2. Implement `get_pipeline(self) -> SamplingPipeline`
+3. Use `build_pipeline(config, vocab_size)` from `core/pipeline.py` to construct the pipeline
+4. Implement engine-specific hook methods (e.g., `apply()` for vLLM)
+5. Register with `@EngineAdapterRegistry.register("my_engine")`
+6. Add entry point in `pyproject.toml` under `[project.entry-points."qr_sampler.engine_adapters"]`
+7. Create a YAML profile in `src/qr_sampler/profiles/engines/my_engine.yaml`
+8. Add tests in `tests/test_engines/`
 
 ### New entropy source
 
@@ -107,14 +131,16 @@ These are fundamental design rules. Do not break them:
 3. Raise `EntropyUnavailableError` from `get_random_bytes()` on failure
 4. Register with `@register_entropy_source("my_name")`
 5. Add entry point in `pyproject.toml` under `[project.entry-points."qr_sampler.entropy_sources"]`
-6. Add tests in `tests/test_entropy/`
+6. Create a YAML profile in `src/qr_sampler/profiles/entropy/my_name.yaml`
+7. Add tests in `tests/test_entropy/`
 
 ### New signal amplifier
 
 1. Create a class in `src/qr_sampler/amplification/` subclassing `SignalAmplifier`
 2. Implement `amplify(raw_bytes) -> AmplificationResult`
 3. Register with `@AmplifierRegistry.register("my_name")`
-4. Add tests in `tests/test_amplification/`
+4. Create a YAML profile in `src/qr_sampler/profiles/amplifiers/my_name.yaml`
+5. Add tests in `tests/test_amplification/`
 
 ### New temperature strategy
 
@@ -122,7 +148,8 @@ These are fundamental design rules. Do not break them:
 2. Implement `compute_temperature(logits, config) -> TemperatureResult`
 3. Always compute and return Shannon entropy (the logging subsystem depends on it)
 4. Register with `@TemperatureStrategyRegistry.register("my_name")`
-5. Add tests in `tests/test_temperature/`
+5. Create a YAML profile in `src/qr_sampler/profiles/samplers/my_name.yaml`
+6. Add tests in `tests/test_temperature/`
 
 ### New config field
 
@@ -131,6 +158,13 @@ These are fundamental design rules. Do not break them:
 3. Environment variable `QR_{FIELD_NAME_UPPER}` is auto-supported
 4. Extra args key `qr_{field_name}` is auto-supported
 5. Add tests in `tests/test_config.py`
+
+### New profile
+
+1. Create a YAML file in the appropriate `src/qr_sampler/profiles/<category>/` directory
+2. Follow the schema defined by the corresponding Pydantic model in `profiles/schema.py`
+3. Include `id`, `name`, `description`, and all relevant compatibility cross-references
+4. Add tests in `tests/test_profiles/` to validate the new profile loads correctly
 
 ## Pull request process
 
@@ -150,7 +184,7 @@ Open an issue with:
 - What you expected to happen
 - What actually happened
 - Steps to reproduce
-- Python version, OS, vLLM version
+- Python version, OS, inference engine and version
 - Relevant configuration (`QR_*` env vars)
 
 ## License

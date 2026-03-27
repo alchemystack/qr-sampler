@@ -1,8 +1,10 @@
-"""qr-sampler: Plug any randomness source into LLM token sampling via vLLM.
+"""qr-sampler: Plug any randomness source into LLM token sampling.
 
-A vLLM V1 LogitsProcessor plugin that replaces standard token sampling with
+An engine-agnostic framework that replaces standard token sampling with
 external-entropy-driven selection. Supports quantum random number generators,
 processor timing jitter, and any user-supplied entropy source via gRPC.
+Ships with a vLLM V1 adapter out of the box; other engines supported via
+the EngineAdapter plugin system.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ except PackageNotFoundError:
     __version__ = "0.0.0"
 
 from qr_sampler.config import QRSamplerConfig, resolve_config, validate_extra_args
+from qr_sampler.core import SamplingPipeline, SamplingResult, build_pipeline
+from qr_sampler.engines.base import EngineAdapter
 from qr_sampler.exceptions import (
     ConfigValidationError,
     EntropyUnavailableError,
@@ -26,13 +30,17 @@ from qr_sampler.processor import QRSamplerLogitsProcessor
 
 __all__ = [
     "ConfigValidationError",
+    "EngineAdapter",
     "EntropyUnavailableError",
     "QRSamplerConfig",
     "QRSamplerError",
     "QRSamplerLogitsProcessor",
+    "SamplingPipeline",
+    "SamplingResult",
     "SignalAmplificationError",
     "TokenSelectionError",
     "__version__",
+    "build_pipeline",
     "resolve_config",
     "validate_extra_args",
 ]

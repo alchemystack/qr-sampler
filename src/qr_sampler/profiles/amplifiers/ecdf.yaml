@@ -1,0 +1,41 @@
+id: ecdf
+name: "ECDF Amplifier"
+description: |
+  Empirical CDF amplifier with online calibration.
+
+  Maps raw entropy bytes to a uniform float u in (0, 1) using a calibrated
+  empirical cumulative distribution function. Unlike the z-score amplifier,
+  the ECDF amplifier makes no assumption about the input distribution -- it
+  learns the distribution from observed data and applies the probability
+  integral transform empirically.
+
+  How it works:
+    1. Maintains a sorted reference sample of observed byte values (calibration)
+    2. For each new batch of raw bytes, computes the empirical CDF value
+    3. Maps the sample statistic through the calibrated ECDF to get u in (0, 1)
+
+  When to use:
+    - When the entropy source may not produce uniformly distributed bytes
+    - When the source distribution is unknown or varies over time
+    - When robustness to non-ideal hardware is more important than theoretical
+      optimality
+
+  When to prefer zscore_mean:
+    - When the source is known to produce uniform bytes (QRNGs, os.urandom)
+    - When you want the clearest statistical interpretation of bias detection
+    - For most standard use cases (zscore_mean is the default for a reason)
+
+  Configuration:
+    QR_SIGNAL_AMPLIFIER_TYPE=ecdf
+
+amplifier_class: "qr_sampler.amplification.ecdf:ECDFAmplifier"
+input_assumptions: "No distributional assumption; calibrates from observed data"
+
+compatible_entropy_sources:
+  - system
+  - quantum_grpc
+  - timing_noise
+  - mock_uniform
+  - openentropy
+
+known_incompatible_entropy_sources: []

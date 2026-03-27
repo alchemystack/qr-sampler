@@ -1,0 +1,32 @@
+id: fixed
+name: "Fixed Temperature"
+description: |
+  Constant temperature applied to all tokens regardless of logit distribution.
+  Default temperature strategy.
+
+  Divides all logits by a fixed temperature value before softmax. Higher
+  temperatures produce flatter probability distributions (more randomness);
+  lower temperatures produce sharper distributions (more deterministic).
+
+  Common values:
+    0.0   -- Greedy decoding (always pick the most probable token)
+    0.3   -- Low creativity, high coherence
+    0.7   -- Balanced (default)
+    1.0   -- Standard softmax, no temperature scaling
+    1.5+  -- High creativity, lower coherence
+
+  Configuration:
+    QR_TEMPERATURE_STRATEGY=fixed           (this is the default)
+    QR_FIXED_TEMPERATURE=0.7                (default value)
+
+  Per-request override:
+    "extra_args": {"qr_temperature_strategy": "fixed", "qr_fixed_temperature": 0.5}
+
+  The fixed strategy always computes and returns Shannon entropy of the logit
+  distribution (the logging subsystem depends on it), even though it does not
+  use entropy in the temperature calculation.
+
+sampler_class: "qr_sampler.temperature.fixed:FixedTemperatureStrategy"
+performance_impact: none
+build_time_locked: false
+requires_vocab_size: false

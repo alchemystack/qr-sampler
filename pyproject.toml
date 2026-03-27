@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "qr-sampler"
 dynamic = ["version"]
-description = "Plug any randomness source into LLM token sampling via vLLM"
+description = "Plug any randomness source into LLM token sampling"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
@@ -28,13 +28,17 @@ dependencies = [
     "pydantic-settings>=2.5.0",
     "grpcio>=1.68.0",
     "protobuf>=5.26.0",
+    "pyyaml>=6.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/qr-sampler/qr-sampler"
-Repository = "https://github.com/qr-sampler/qr-sampler"
-Issues = "https://github.com/qr-sampler/qr-sampler/issues"
-Changelog = "https://github.com/qr-sampler/qr-sampler/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/alchemystack/qr-sampler"
+Repository = "https://github.com/alchemystack/qr-sampler"
+Issues = "https://github.com/alchemystack/qr-sampler/issues"
+Changelog = "https://github.com/alchemystack/qr-sampler/blob/main/CHANGELOG.md"
+
+[project.scripts]
+qr-sampler = "qr_sampler.cli.main:cli"
 
 [project.optional-dependencies]
 dev = [
@@ -45,13 +49,25 @@ dev = [
     "mypy>=1.10.0",
     "pre-commit>=4.0",
     "bandit>=1.8.0",
+    "types-PyYAML>=6.0",
+    "click>=8.0",
+    "jinja2>=3.1",
+]
+cli = [
+    "click>=8.0",
+    "jinja2>=3.1",
 ]
 openentropy = [
     "openentropy>=0.10.0",
 ]
+vllm = []
+vllm-metal = []
 
 [project.entry-points."vllm.logits_processors"]
 qr_sampler = "qr_sampler.processor:QRSamplerLogitsProcessor"
+
+[project.entry-points."qr_sampler.engine_adapters"]
+vllm = "qr_sampler.engines.vllm:VLLMAdapter"
 
 [project.entry-points."qr_sampler.entropy_sources"]
 system = "qr_sampler.entropy.system:SystemEntropySource"
@@ -62,6 +78,9 @@ openentropy = "qr_sampler.entropy.openentropy:OpenEntropySource"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"qr_sampler" = ["profiles/**/*.yaml", "templates/**/*.j2", "py.typed"]
 
 [tool.setuptools_scm]
 fallback_version = "0.1.0.dev0"
@@ -104,6 +123,14 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "openentropy.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["click", "click.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["jinja2", "jinja2.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]

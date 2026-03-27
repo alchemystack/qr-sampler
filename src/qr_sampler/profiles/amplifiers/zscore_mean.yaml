@@ -1,0 +1,45 @@
+id: zscore_mean
+name: "Z-Score Mean"
+description: |
+  Z-score of byte-mean mapped to uniform via normal CDF. Default amplifier.
+
+  Converts N raw entropy bytes into a single float u in (0, 1) by:
+    1. Interpreting bytes as uint8 values [0, 255]
+    2. Computing sample mean M
+    3. Computing SEM = population_std / sqrt(N)   (always derived, never stored)
+    4. Computing z = (M - population_mean) / SEM
+    5. Mapping to uniform: u = 0.5 * (1 + erf(z / sqrt(2)))
+    6. Clamping to (epsilon, 1 - epsilon) to avoid degenerate CDF lookups
+
+  Under the null hypothesis (unbiased source), u is uniformly distributed on
+  (0, 1) by the probability integral transform. A small per-byte mean bias
+  accumulates across N samples and shifts u away from 0.5:
+
+    Example: 20,480 bytes with +0.003 mean bias per byte
+    M ~ 127.56, SEM ~ 0.514, z ~ 0.12, u ~ 0.548
+
+  This makes even tiny biases statistically observable while maintaining a
+  well-defined distribution for token selection.
+
+  Assumes the entropy source produces approximately uniform bytes (each byte
+  i.i.d. from Uniform[0, 255]). This holds for system entropy, quantum RNGs,
+  and most hardware sources. For sources with non-uniform output, use the
+  ecdf amplifier instead.
+
+  Configuration:
+    QR_SIGNAL_AMPLIFIER_TYPE=zscore_mean    (this is the default)
+    QR_SAMPLE_COUNT=20480                   (bytes per token, default)
+    QR_POPULATION_MEAN=127.5               (null hypothesis mean)
+    QR_POPULATION_STD=73.61215932...       (std of Uniform[0, 255])
+
+amplifier_class: "qr_sampler.amplification.zscore:ZScoreMeanAmplifier"
+input_assumptions: "Uniform byte distribution (each byte i.i.d. Uniform[0, 255])"
+
+compatible_entropy_sources:
+  - system
+  - quantum_grpc
+  - timing_noise
+  - mock_uniform
+  - openentropy
+
+known_incompatible_entropy_sources: []

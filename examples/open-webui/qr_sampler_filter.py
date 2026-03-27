@@ -1,7 +1,7 @@
 """
 title: QR-Sampler Parameters
 author: qr-sampler
-author_url: https://github.com/your-org/qr-sampler
+author_url: https://github.com/alchemystack/qr-sampler
 version: 0.1.0
 license: MIT
 description: Injects qr-sampler per-request parameters into vLLM requests. Configure sampling parameters via Valves to control external-entropy-driven token selection.

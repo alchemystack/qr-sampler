@@ -1,0 +1,513 @@
+"""Tests for VLLMAdapter — the vLLM engine adapter.
+
+Verifies that VLLMAdapter delegates sampling to SamplingPipeline,
+handles batch state management, and maintains backward compatibility
+with QRSamplerLogitsProcessor.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+import pytest
+
+from qr_sampler.config import QRSamplerConfig
+from qr_sampler.core.pipeline import SamplingPipeline
+from qr_sampler.engines.base import EngineAdapter
+from qr_sampler.engines.vllm import _DEFAULT_VOCAB_SIZE, VLLMAdapter
+from qr_sampler.exceptions import ConfigValidationError
+
+# ---------------------------------------------------------------------------
+# Mock objects simulating vLLM's batch management types
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MockVllmConfig:
+    """Simulates vLLM's VllmConfig with vocab_size access."""
+
+    vocab_size: int = 10
+
+
+@dataclass
+class MockModelConfig:
+    """Simulates vLLM's model config nested structure."""
+
+    hf_text_config: Any = None
+
+
+@dataclass
+class MockHfTextConfig:
+    """Simulates the HuggingFace text config with vocab_size."""
+
+    vocab_size: int = 10
+
+
+@dataclass
+class MockSamplingParams:
+    """Simulates vLLM's SamplingParams."""
+
+    extra_args: dict[str, Any] | None = None
+
+
+@dataclass
+class MockAddedRequest:
+    """Simulates a BatchUpdate added request."""
+
+    req_index: int
+    sampling_params: MockSamplingParams | None = None
+
+
+@dataclass
+class MockMovedRequest:
+    """Simulates a BatchUpdate moved request."""
+
+    src_index: int
+    dst_index: int
+
+
+@dataclass
+class MockBatchUpdate:
+    """Simulates vLLM's BatchUpdate dataclass."""
+
+    removed: list[int] | None = None
+    moved: list[MockMovedRequest] | None = None
+    added: list[MockAddedRequest] | None = None
+
+    def __post_init__(self) -> None:
+        if self.removed is None:
+            self.removed = []
+        if self.moved is None:
+            self.moved = []
+        if self.added is None:
+            self.added = []
+
+
+# ---------------------------------------------------------------------------
+# Helper to create an adapter with MockUniformSource
+# ---------------------------------------------------------------------------
+
+
+def _make_adapter(
+    vocab_size: int = 10,
+    entropy_source_type: str = "mock_uniform",
+    fallback_mode: str = "error",
+    **config_overrides: Any,
+) -> VLLMAdapter:
+    """Create an adapter using mock entropy (no gRPC, no GPU).
+
+    Sets environment variables to configure, then instantiates.
+    """
+    import os
+
+    env_vars = {
+        "QR_ENTROPY_SOURCE_TYPE": entropy_source_type,
+        "QR_FALLBACK_MODE": fallback_mode,
+        "QR_LOG_LEVEL": "none",
+    }
+    for key, value in config_overrides.items():
+        env_vars[f"QR_{key.upper()}"] = str(value)
+
+    old_env: dict[str, str | None] = {}
+    for key, value in env_vars.items():
+        old_env[key] = os.environ.get(key)
+        os.environ[key] = value
+
+    try:
+        vllm_config = MockVllmConfig(vocab_size=vocab_size)
+        adapter = VLLMAdapter(
+            vllm_config=vllm_config,
+            device=None,
+            is_pin_memory=False,
+        )
+    finally:
+        for key, original in old_env.items():
+            if original is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original
+
+    return adapter
+
+
+# ---------------------------------------------------------------------------
+# Tests: Adapter basics and EngineAdapter contract
+# ---------------------------------------------------------------------------
+
+
+class TestVLLMAdapterInit:
+    """Test VLLMAdapter construction and EngineAdapter contract."""
+
+    def test_is_engine_adapter(self) -> None:
+        """VLLMAdapter is a subclass of EngineAdapter."""
+        assert issubclass(VLLMAdapter, EngineAdapter)
+
+    def test_init_with_mock_source(self) -> None:
+        """Adapter initializes successfully with mock entropy source."""
+        adapter = _make_adapter()
+        assert adapter._vocab_size == 10
+        assert adapter.is_argmax_invariant() is False
+
+    def test_get_pipeline_returns_sampling_pipeline(self) -> None:
+        """get_pipeline() returns a SamplingPipeline instance."""
+        adapter = _make_adapter()
+        pipeline = adapter.get_pipeline()
+        assert isinstance(pipeline, SamplingPipeline)
+        adapter.close()
+
+    def test_init_with_none_vllm_config(self) -> None:
+        """When vllm_config is None, uses default vocab size."""
+        import os
+
+        os.environ["QR_ENTROPY_SOURCE_TYPE"] = "mock_uniform"
+        os.environ["QR_FALLBACK_MODE"] = "error"
+        os.environ["QR_LOG_LEVEL"] = "none"
+        try:
+            adapter = VLLMAdapter(vllm_config=None)
+            assert adapter._vocab_size == _DEFAULT_VOCAB_SIZE
+        finally:
+            os.environ.pop("QR_ENTROPY_SOURCE_TYPE", None)
+            os.environ.pop("QR_FALLBACK_MODE", None)
+            os.environ.pop("QR_LOG_LEVEL", None)
+
+    def test_init_with_nested_vllm_config(self) -> None:
+        """Extracts vocab_size from nested vLLM config structure."""
+        hf = MockHfTextConfig(vocab_size=256)
+        model_cfg = MockModelConfig(hf_text_config=hf)
+
+        @dataclass
+        class NestedConfig:
+            model_config: Any = None
+
+        config = NestedConfig(model_config=model_cfg)
+        vocab = VLLMAdapter._extract_vocab_size(config)
+        assert vocab == 256
+
+    def test_extract_vocab_size_fallback(self) -> None:
+        """Falls back to default when config has no vocab_size."""
+
+        class EmptyConfig:
+            pass
+
+        vocab = VLLMAdapter._extract_vocab_size(EmptyConfig())
+        assert vocab == _DEFAULT_VOCAB_SIZE
+
+
+# ---------------------------------------------------------------------------
+# Tests: Pipeline delegation
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineDelegation:
+    """Test that VLLMAdapter delegates sampling to SamplingPipeline."""
+
+    def test_apply_delegates_to_pipeline(self) -> None:
+        """apply() uses pipeline.sample_token() internally."""
+        adapter = _make_adapter()
+        logits = np.array([[5.0, 4.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0]])
+        result = adapter.apply(logits)
+
+        # Verify one-hot output structure.
+        row = result[0]
+        assert np.sum(row == 0.0) == 1
+        assert np.sum(np.isneginf(row)) == 9
+        adapter.close()
+
+    def test_entropy_source_property(self) -> None:
+        """entropy_source property delegates to pipeline."""
+        adapter = _make_adapter()
+        assert adapter.entropy_source is adapter.get_pipeline().entropy_source
+        adapter.close()
+
+    def test_sampling_logger_property(self) -> None:
+        """sampling_logger property delegates to pipeline."""
+        adapter = _make_adapter()
+        assert adapter.sampling_logger is adapter.get_pipeline().sampling_logger
+        adapter.close()
+
+    def test_default_config_property(self) -> None:
+        """default_config property returns the adapter's config."""
+        adapter = _make_adapter()
+        assert isinstance(adapter.default_config, QRSamplerConfig)
+        adapter.close()
+
+    def test_close_delegates_to_pipeline(self) -> None:
+        """close() delegates to pipeline.close()."""
+        adapter = _make_adapter()
+        adapter.close()  # Should not raise.
+
+    def test_close_idempotent(self) -> None:
+        """close() can be called multiple times safely."""
+        adapter = _make_adapter()
+        adapter.close()
+        adapter.close()  # Should not raise.
+
+
+# ---------------------------------------------------------------------------
+# Tests: Batch processing
+# ---------------------------------------------------------------------------
+
+
+class TestBatchProcessing:
+    """Test apply() with various batch shapes."""
+
+    def test_single_row_onehot(self) -> None:
+        """apply() produces one-hot output for a single-row batch."""
+        adapter = _make_adapter()
+        logits = np.array([[5.0, 4.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0]])
+        result = adapter.apply(logits)
+        assert result is logits  # In-place modification.
+        row = result[0]
+        assert np.sum(row == 0.0) == 1
+        assert np.sum(np.isneginf(row)) == 9
+
+    def test_multi_row_batch(self) -> None:
+        """apply() processes all rows in a batch."""
+        adapter = _make_adapter()
+        logits = np.array(
+            [
+                [5.0, 4.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [
+                    -1.0,
+                    -1.0,
+                    -1.0,
+                    -1.0,
+                    10.0,
+                    -1.0,
+                    -1.0,
+                    -1.0,
+                    -1.0,
+                    -1.0,
+                ],
+            ]
+        )
+        result = adapter.apply(logits)
+        for i in range(3):
+            row = result[i]
+            assert np.sum(row == 0.0) == 1
+            assert np.sum(np.isneginf(row)) == 9
+
+    def test_1d_logits(self) -> None:
+        """apply() handles 1-D logits (single request, no batch dim)."""
+        adapter = _make_adapter()
+        logits = np.array([5.0, 4.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0])
+        result = adapter.apply(logits)
+        assert np.sum(result == 0.0) == 1
+        assert np.sum(np.isneginf(result)) == 9
+
+    def test_empty_batch(self) -> None:
+        """apply() short-circuits on empty batch."""
+        adapter = _make_adapter()
+        logits = np.empty((0, 10))
+        result = adapter.apply(logits)
+        assert result.shape == (0, 10)
+
+    def test_dominant_token_selected(self) -> None:
+        """A very dominant logit is always selected."""
+        adapter = _make_adapter()
+        logits = np.array(
+            [
+                [
+                    -100.0,
+                    -100.0,
+                    -100.0,
+                    -100.0,
+                    100.0,
+                    -100.0,
+                    -100.0,
+                    -100.0,
+                    -100.0,
+                    -100.0,
+                ]
+            ]
+        )
+        result = adapter.apply(logits)
+        assert result[0, 4] == 0.0
+
+    def test_inplace_modification(self) -> None:
+        """apply() modifies the logits array in-place and returns it."""
+        adapter = _make_adapter()
+        logits = np.array([[5.0, 4.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0]])
+        result = adapter.apply(logits)
+        assert result is logits
+
+
+# ---------------------------------------------------------------------------
+# Tests: update_state
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateState:
+    """Test update_state() batch management."""
+
+    def test_add_request(self) -> None:
+        """Adding a request creates per-request state."""
+        adapter = _make_adapter()
+        batch = MockBatchUpdate(
+            added=[MockAddedRequest(req_index=0, sampling_params=MockSamplingParams())]
+        )
+        adapter.update_state(batch)
+        assert 0 in adapter._request_states
+
+    def test_add_request_with_overrides(self) -> None:
+        """Added request with extra_args gets resolved config."""
+        adapter = _make_adapter()
+        params = MockSamplingParams(extra_args={"qr_top_k": 100})
+        batch = MockBatchUpdate(added=[MockAddedRequest(req_index=0, sampling_params=params)])
+        adapter.update_state(batch)
+        assert adapter._request_states[0].config.top_k == 100
+
+    def test_remove_request(self) -> None:
+        """Removing a request cleans up per-request state."""
+        adapter = _make_adapter()
+        adapter.update_state(
+            MockBatchUpdate(
+                added=[MockAddedRequest(req_index=0, sampling_params=MockSamplingParams())]
+            )
+        )
+        assert 0 in adapter._request_states
+        adapter.update_state(MockBatchUpdate(removed=[0]))
+        assert 0 not in adapter._request_states
+
+    def test_move_request(self) -> None:
+        """Moving a request updates state index."""
+        adapter = _make_adapter()
+        adapter.update_state(
+            MockBatchUpdate(
+                added=[MockAddedRequest(req_index=0, sampling_params=MockSamplingParams())]
+            )
+        )
+        adapter.update_state(MockBatchUpdate(moved=[MockMovedRequest(src_index=0, dst_index=5)]))
+        assert 0 not in adapter._request_states
+        assert 5 in adapter._request_states
+
+    def test_none_batch_update(self) -> None:
+        """None batch_update is a no-op."""
+        adapter = _make_adapter()
+        adapter.update_state(None)  # Should not raise.
+
+    def test_per_request_config_in_apply(self) -> None:
+        """Per-request config affects token selection parameters."""
+        adapter = _make_adapter()
+        params = MockSamplingParams(extra_args={"qr_top_k": 1})
+        adapter.update_state(
+            MockBatchUpdate(added=[MockAddedRequest(req_index=0, sampling_params=params)])
+        )
+        logits = np.array([[5.0, 4.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0]])
+        result = adapter.apply(logits)
+        # With top_k=1, only the highest logit (index 0) should be selected.
+        assert result[0, 0] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Tests: validate_params
+# ---------------------------------------------------------------------------
+
+
+class TestValidateParams:
+    """Test validate_params() classmethod."""
+
+    def test_valid_extra_args(self) -> None:
+        """Valid qr_ keys pass validation."""
+        params = MockSamplingParams(extra_args={"qr_top_k": 100})
+        VLLMAdapter.validate_params(params)
+
+    def test_invalid_key_raises(self) -> None:
+        """Unknown qr_ key raises ConfigValidationError."""
+        params = MockSamplingParams(extra_args={"qr_nonexistent": 42})
+        with pytest.raises(ConfigValidationError):
+            VLLMAdapter.validate_params(params)
+
+    def test_non_overridable_field_raises(self) -> None:
+        """Infrastructure field raises ConfigValidationError."""
+        params = MockSamplingParams(extra_args={"qr_grpc_server_address": "foo"})
+        with pytest.raises(ConfigValidationError):
+            VLLMAdapter.validate_params(params)
+
+    def test_empty_extra_args(self) -> None:
+        """Empty extra_args passes validation."""
+        params = MockSamplingParams(extra_args={})
+        VLLMAdapter.validate_params(params)
+
+    def test_no_extra_args(self) -> None:
+        """Missing extra_args passes validation."""
+        params = MockSamplingParams(extra_args=None)
+        VLLMAdapter.validate_params(params)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Diagnostic logging
+# ---------------------------------------------------------------------------
+
+
+class TestDiagnosticLogging:
+    """Test that the adapter produces valid diagnostic records."""
+
+    def test_diagnostic_records_stored(self) -> None:
+        """With diagnostic_mode=True, records are stored."""
+        adapter = _make_adapter(diagnostic_mode=True)
+        logits = np.array([[5.0, 4.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0]])
+        adapter.apply(logits)
+
+        records = adapter.sampling_logger.get_diagnostic_data()
+        assert len(records) == 1
+
+        record = records[0]
+        assert record.token_id >= 0
+        assert record.token_id < 10
+        assert 0.0 < record.u_value < 1.0
+        assert record.token_rank >= 0
+        assert record.token_prob > 0.0
+        assert record.num_candidates > 0
+        assert record.entropy_fetch_ms >= 0.0
+        assert record.total_sampling_ms > 0.0
+        assert len(record.config_hash) == 16
+        assert record.temperature_used > 0.0
+
+    def test_entropy_source_tracking(self) -> None:
+        """Diagnostic records track which entropy source was used."""
+        adapter = _make_adapter(diagnostic_mode=True)
+        logits = np.array([[5.0, 4.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0]])
+        adapter.apply(logits)
+
+        record = adapter.sampling_logger.get_diagnostic_data()[0]
+        assert record.entropy_source_used == "mock_uniform"
+        assert record.entropy_is_fallback is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: Backward compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestBackwardCompatibility:
+    """Test that the re-export structure preserves backward compatibility."""
+
+    def test_processor_re_export(self) -> None:
+        """QRSamplerLogitsProcessor in processor.py resolves to VLLMAdapter."""
+        from qr_sampler.processor import QRSamplerLogitsProcessor
+
+        assert QRSamplerLogitsProcessor is VLLMAdapter
+
+    def test_top_level_re_export(self) -> None:
+        """QRSamplerLogitsProcessor in __init__.py resolves to VLLMAdapter."""
+        from qr_sampler import QRSamplerLogitsProcessor
+
+        assert QRSamplerLogitsProcessor is VLLMAdapter
+
+    def test_new_exports_available(self) -> None:
+        """New exports are available from the top-level package."""
+        from qr_sampler import (
+            EngineAdapter,
+            SamplingPipeline,
+            SamplingResult,
+            build_pipeline,
+        )
+
+        assert EngineAdapter is not None
+        assert SamplingPipeline is not None
+        assert SamplingResult is not None
+        assert build_pipeline is not None

@@ -1,0 +1,37 @@
+id: system
+name: "System Entropy"
+description: |
+  OS-provided cryptographic randomness via os.urandom().
+
+  Uses the operating system's CSPRNG (Cryptographically Secure Pseudo-Random
+  Number Generator) -- /dev/urandom on Linux/macOS, CryptGenRandom on Windows.
+  Available on all platforms with zero configuration and no external dependencies.
+
+  This is the default entropy source and the recommended starting point for:
+    - Development and testing
+    - Verifying the full pipeline works before connecting hardware
+    - Baseline experiments (pseudorandom control group)
+
+  For consciousness-research experiments requiring true physical randomness,
+  use quantum_grpc (with a QRNG server) or openentropy (local hardware noise)
+  instead.
+
+  Configuration:
+    QR_ENTROPY_SOURCE_TYPE=system    (this is the default)
+
+  No additional environment variables are needed. System entropy is also used
+  as the automatic fallback when the primary source fails (unless
+  QR_FALLBACK_MODE=error).
+
+source_class: "qr_sampler.entropy.system:SystemEntropySource"
+transport: local
+
+dependencies: []
+
+compatible_amplifiers:
+  - zscore_mean
+  - ecdf
+
+known_incompatible_amplifiers: []
+
+defaults: {}

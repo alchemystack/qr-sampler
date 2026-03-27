@@ -1,0 +1,41 @@
+id: edt
+name: "Entropy-Dependent Temperature (EDT)"
+description: |
+  Dynamically adjusts temperature based on Shannon entropy of the logit
+  distribution. Creates a feedback loop where the model's own uncertainty
+  calibrates the randomness of token selection.
+
+  Formula:
+    H_norm = H / ln(vocab_size)           # Normalized entropy [0, 1]
+    T = base_temp * H_norm ^ exponent     # Power-law scaling
+    T = clamp(T, min_temp, max_temp)      # Bounds enforcement
+
+  Behavior:
+    - High-entropy (uncertain) distributions -> higher temperature -> more
+      exploration among candidate tokens
+    - Low-entropy (confident) distributions -> lower temperature -> the model's
+      top choice is more likely to be selected
+    - The exponent controls sensitivity: <1.0 = gentle curve, >1.0 = aggressive
+
+  Configuration:
+    QR_TEMPERATURE_STRATEGY=edt
+    QR_EDT_BASE_TEMP=0.8                  (base coefficient)
+    QR_EDT_EXPONENT=0.5                   (power-law exponent)
+    QR_EDT_MIN_TEMP=0.1                   (temperature floor)
+    QR_EDT_MAX_TEMP=2.0                   (temperature ceiling)
+
+  Per-request override:
+    "extra_args": {
+      "qr_temperature_strategy": "edt",
+      "qr_edt_base_temp": 1.0,
+      "qr_edt_exponent": 0.3
+    }
+
+  Requires vocab_size at construction time to compute the normalization
+  constant ln(vocab_size). The registry detects this and passes vocab_size
+  automatically.
+
+sampler_class: "qr_sampler.temperature.edt:EDTTemperatureStrategy"
+performance_impact: none
+build_time_locked: false
+requires_vocab_size: true

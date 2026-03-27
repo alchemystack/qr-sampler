@@ -1,0 +1,43 @@
+id: timing_noise
+name: "Timing Noise"
+description: |
+  CPU timing jitter entropy source (experimental).
+
+  Generates random bytes by measuring nanosecond-resolution variations in CPU
+  clock timing. Each byte is derived from the least significant bits of
+  high-resolution timer differences across tight loops.
+
+  Status: EXPERIMENTAL. Entropy quality depends heavily on:
+    - CPU architecture and microarchitectural state
+    - OS scheduler behavior and interrupt patterns
+    - System load and thermal throttling
+    - Virtualization (VMs may have reduced timer resolution)
+
+  Best suited for:
+    - Environments where no gRPC server or hardware RNG is available
+    - Supplementary entropy mixed with other sources
+    - Exploring timing-based randomness as a research topic
+
+  Not recommended for:
+    - Production consciousness-research experiments (use quantum_grpc or
+      openentropy instead)
+    - High-throughput scenarios (timing measurement adds latency per byte)
+
+  Configuration:
+    QR_ENTROPY_SOURCE_TYPE=timing_noise
+
+  No additional dependencies or configuration needed. Works on all platforms
+  with a high-resolution timer (Linux, macOS, Windows).
+
+source_class: "qr_sampler.entropy.timing:TimingNoiseSource"
+transport: local
+
+dependencies: []
+
+compatible_amplifiers:
+  - zscore_mean
+  - ecdf
+
+known_incompatible_amplifiers: []
+
+defaults: {}

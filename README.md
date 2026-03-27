@@ -1,8 +1,8 @@
 # qr-sampler
 
-**Plug any randomness source into LLM token sampling via vLLM.**
+**Plug any randomness source into LLM token sampling.**
 
-qr-sampler is a [vLLM V1](https://github.com/vllm-project/vllm) LogitsProcessor plugin that replaces standard pseudorandom token sampling with entropy from external sources — quantum random number generators (QRNGs), processor timing jitter, or any hardware you connect via gRPC. It is designed for researchers studying non-deterministic LLM behavior and the potential influence of physical randomness on language model outputs.
+qr-sampler is an engine-agnostic framework that replaces standard pseudorandom token sampling with entropy from external sources — quantum random number generators (QRNGs), processor timing jitter, hardware noise, or any source you connect via gRPC or Python plugin. The core sampling pipeline has zero inference-engine dependencies; thin engine adapters integrate it with [vLLM](https://github.com/vllm-project/vllm), [vLLM-Metal](https://github.com/vllm-project/vllm-metal), or any engine that supports logits processing.
 
 ```
 pip install qr-sampler
@@ -15,9 +15,10 @@ pip install qr-sampler
 Standard LLM inference uses pseudorandom number generators (PRNGs) for token sampling. PRNGs are deterministic — given the same seed, they produce the same output every time. qr-sampler replaces this with *true* randomness from physical processes:
 
 - **Quantum RNGs** — photon detectors, vacuum fluctuation devices, or any hardware QRNG over gRPC
+- **Hardware noise** — 63 thermal, timing, microarch, and GPU noise sources via [OpenEntropy](https://github.com/amenti-labs/openentropy)
 - **Processor timing jitter** — CPU clock variations as an entropy source (experimental)
 - **Your own source** — implement the `EntropySource` ABC or connect any hardware via the gRPC protocol
-- **OS entropy** — `/dev/urandom` as a fallback or baseline (not useful for consciousness studies)
+- **OS entropy** — `os.urandom()` as a fallback or baseline
 
 ### Consciousness-research context
 
@@ -27,60 +28,100 @@ This is a research tool. It makes no claims about consciousness or quantum mecha
 
 ---
 
-## How it works
+## Architecture
 
 ```
-Logits from vLLM (one row per batch request)
+                          qr-sampler
+  ┌──────────────────────────────────────────────────────┐
+  │                                                      │
+  │  ┌─────────────────────────────────────────────┐     │
+  │  │           core/ (engine-agnostic)            │     │
+  │  │  SamplingPipeline: numpy-only, no torch     │     │
+  │  │                                              │     │
+  │  │  entropy/ ──► amplification/ ──► selection/  │     │
+  │  │      │            │                  │       │     │
+  │  │  get_random   amplify(bytes)    CDF search  │     │
+  │  │  _bytes(n)    → u ∈ (0,1)      → token_id  │     │
+  │  │                                              │     │
+  │  │  temperature/ ─── compute_temperature()      │     │
+  │  │  logging/ ─────── per-token diagnostics      │     │
+  │  └──────────────────────┬──────────────────────┘     │
+  │                         │                            │
+  │  ┌──────────────────────┴──────────────────────┐     │
+  │  │         engines/ (thin adapters)             │     │
+  │  │  VLLMAdapter: torch ↔ numpy, one-hot force  │     │
+  │  │  (future: MLXAdapter, TRTLLMAdapter, ...)   │     │
+  │  └─────────────────────────────────────────────┘     │
+  │                                                      │
+  │  profiles/ ─── declarative YAML metadata             │
+  │  cli/ ──────── validate, build, list, info           │
+  │  templates/ ── Jinja2 for Docker Compose generation  │
+  └──────────────────────────────────────────────────────┘
+```
+
+### Per-token sampling pipeline
+
+```
+Engine adapter calls pipeline.sample_token(logits_1d)
   │
   ├─ Temperature strategy ─────── Compute per-token temperature
   │   (fixed or entropy-dependent)    from the logit distribution
   │
   ├─ Entropy source ───────────── Fetch fresh random bytes
-  │   (gRPC QRNG / system / timing)   just-in-time, after logits exist
+  │   (gRPC / system / timing /       just-in-time, after logits exist
+  │    openentropy / custom)
   │
   ├─ Signal amplification ─────── Convert 20,480 bytes → one float u ∈ (0,1)
-  │   (z-score → normal CDF)         via statistical aggregation
+  │   (z-score or ECDF)               via statistical aggregation
   │
   ├─ Token selector ───────────── top-k → softmax → top-p → CDF → select
-  │   (CDF binary search with u)     token from probability distribution
+  │   (CDF binary search with u)      token from probability distribution
   │
   └─ Force one-hot logits ─────── Set selected token to 0.0, all others to -inf
-      (vLLM picks exactly this token)
+      (engine picks exactly              (returned as numpy; adapter converts
+       this token)                        to engine-native tensor)
 ```
 
-The processor registers via Python entry points — no vLLM source code modifications needed.
+The core pipeline is importable and functional without vLLM, torch, or any engine package. Engine adapters convert between engine-native tensors and numpy, delegate to `SamplingPipeline.sample_token()`, and write the result back.
 
 ---
 
 ## Quick start
 
-### Docker with an external entropy source (recommended)
+### 1. Validate your stack (optional)
 
-Each entropy source has a self-contained deployment profile under `deployments/`. Pick the one that matches your setup:
-
-| Profile | Entropy source | Description |
-|---------|---------------|-------------|
-| [`urandom/`](deployments/urandom/) | `os.urandom()` via gRPC | Local gRPC server for testing the full pipeline. **Start here.** |
-| [`firefly-1/`](deployments/firefly-1/) | Quantum RNG via gRPC | External QRNG server with API key auth. |
-| [`_template/`](deployments/_template/) | Your hardware | Copy and customize for your own entropy source. |
-
-#### 1. Choose a profile and configure
+The CLI checks compatibility of engines, models, entropy sources, and amplifiers before you deploy:
 
 ```bash
-cd deployments/urandom
-cp .env.example .env
-# Edit .env — set HF_TOKEN if using a gated model
+pip install qr-sampler[cli]
+
+# Check a specific combination
+qr-sampler validate --engine vllm --model Qwen/Qwen2.5-1.5B-Instruct --entropy quantum_grpc
+
+# Exit codes: 0 = all known-working, 1 = untested, 2 = incompatible
 ```
 
-#### 2. Launch
+### 2. Generate deployment files
 
 ```bash
+# Generate Docker Compose for vLLM + quantum gRPC entropy
+qr-sampler build --engine vllm --entropy quantum_grpc --output ./deploy
+
+# Preview without writing files
+qr-sampler build --engine vllm --entropy system --dry-run
+```
+
+This renders a `docker-compose.yml` and `.env` from built-in Jinja2 templates, configured for your chosen stack.
+
+### 3. Launch
+
+```bash
+cd deploy
+# Edit .env — set HF_TOKEN if using a gated model
 docker compose up --build
 ```
 
-This builds a vLLM image with qr-sampler baked in, starts any required entropy server containers, and connects everything automatically.
-
-#### 3. Send a request
+### 4. Send a request
 
 ```bash
 curl http://localhost:8000/v1/completions \
@@ -92,19 +133,9 @@ curl http://localhost:8000/v1/completions \
   }'
 ```
 
-To connect your own QRNG hardware, copy the template and follow the [Setting up your own entropy source](#setting-up-your-own-entropy-source) guide:
-
-```bash
-cp -r deployments/_template deployments/my-qrng
-# Edit deployments/my-qrng/.env and deployments/my-qrng/docker-compose.yml
-```
-
-See [deployments/README.md](deployments/README.md) for the full guide.
-
 ### Bare-metal install (without Docker)
 
 ```bash
-# Install qr-sampler (includes gRPC support)
 pip install qr-sampler
 
 # Start vLLM — qr-sampler registers automatically via entry points
@@ -149,7 +180,7 @@ source ~/.venv-vllm-metal/bin/activate
 vllm serve mlx-community/Qwen3-0.6B-4bit
 ```
 
-qr-sampler registers automatically via the same `vllm.logits_processors` entry point — no additional configuration needed. Look for this line in the server logs to confirm the plugin is active:
+qr-sampler registers automatically via the same `vllm.logits_processors` entry point. Look for this line in the server logs to confirm the plugin is active:
 
 ```
 QRSamplerLogitsProcessor initialized: vocab_size=..., entropy_source=system+system, amplifier=zscore_mean, temperature=fixed
@@ -158,7 +189,6 @@ QRSamplerLogitsProcessor initialized: vocab_size=..., entropy_source=system+syst
 #### 4. Send a request
 
 ```bash
-# Completions
 curl http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -166,26 +196,219 @@ curl http://localhost:8000/v1/completions \
     "prompt": "The nature of consciousness is",
     "max_tokens": 100
   }'
-
-# Chat completions
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "mlx-community/Qwen3-0.6B-4bit",
-    "messages": [{"role": "user", "content": "Tell me about quantum randomness"}],
-    "max_tokens": 100
-  }'
 ```
 
 All configuration (entropy sources, temperature strategies, per-request overrides) works identically to the NVIDIA setup. The only difference is how vLLM itself is installed.
 
-> **Note:** The Docker deployment profiles are not compatible with Apple Silicon. Docker on macOS runs a Linux VM with no Metal GPU passthrough, so vllm-metal must run natively. To use Open WebUI on Apple Silicon, see the [Web UI](#web-ui) section.
+> **Note:** Docker deployment profiles are not compatible with Apple Silicon — Docker on macOS runs a Linux VM with no Metal GPU passthrough. vllm-metal must run natively.
 
-### System entropy fallback
+---
 
-Without an external entropy source, qr-sampler falls back to `os.urandom()`. This is useful for development and testing but does not provide the quantum randomness needed for consciousness-research experiments. To use system entropy, set `QR_ENTROPY_SOURCE_TYPE=system` (this is the default).
+## CLI reference
 
-### Per-request parameter overrides
+The CLI requires the `[cli]` extra: `pip install qr-sampler[cli]`
+
+### `qr-sampler list`
+
+Browse available components:
+
+```bash
+qr-sampler list engines              # Engine profiles (vllm, vllm_metal)
+qr-sampler list models --engine vllm # Known-working models for an engine
+qr-sampler list entropy-sources      # All entropy source profiles
+qr-sampler list amplifiers           # Signal amplification algorithms
+qr-sampler list samplers             # Temperature strategies
+```
+
+### `qr-sampler info`
+
+Detailed information about a specific component:
+
+```bash
+qr-sampler info engine vllm
+qr-sampler info entropy quantum_grpc
+qr-sampler info amplifier zscore_mean
+qr-sampler info sampler edt
+```
+
+### `qr-sampler validate`
+
+Check stack compatibility before deploying:
+
+```bash
+# Check specific combination
+qr-sampler validate --engine vllm --model Qwen/Qwen2.5-1.5B-Instruct
+
+# With a config file
+qr-sampler validate --config stack.yaml
+```
+
+Exit codes: `0` = all known-working, `1` = untested combinations (warnings), `2` = incompatible or missing.
+
+### `qr-sampler build`
+
+Generate Docker Compose deployment files:
+
+```bash
+# Generate files
+qr-sampler build --engine vllm --entropy quantum_grpc --output ./deploy
+
+# Preview without writing
+qr-sampler build --engine vllm --entropy system --dry-run
+
+# Bypass compatibility warnings
+qr-sampler build --engine vllm --entropy timing_noise --force --output ./deploy
+
+# From a config file
+qr-sampler build --config stack.yaml --output ./deploy
+```
+
+---
+
+## Entropy sources
+
+### Built-in sources
+
+| Source | Identifier | Transport | Description |
+|---|---|---|---|
+| **System** | `system` | Local | `os.urandom()` — OS cryptographic RNG. Available everywhere. Default. |
+| **Quantum gRPC** | `quantum_grpc` | gRPC | Remote entropy server via gRPC. Supports unary, server streaming, and bidi streaming. |
+| **OpenEntropy** | `openentropy` | Local | 63 hardware noise sources (thermal, timing, microarch, GPU). No network needed. |
+| **Timing noise** | `timing_noise` | Local | CPU timing jitter (experimental). |
+| **Mock uniform** | `mock_uniform` | Local | Configurable test source with seed/bias. For testing only. |
+
+### Quantum gRPC
+
+Connect any entropy server that speaks gRPC. qr-sampler ships example servers and an annotated template:
+
+```bash
+# Run the built-in urandom-over-gRPC example server
+pip install qr-sampler
+python examples/servers/simple_urandom_server.py --address 0.0.0.0:50051
+
+# Point qr-sampler at it
+export QR_ENTROPY_SOURCE_TYPE=quantum_grpc
+export QR_GRPC_SERVER_ADDRESS=localhost:50051
+```
+
+Three transport modes:
+
+| Mode | `QR_GRPC_MODE` | Latency | Best for |
+|---|---|---|---|
+| **Unary** | `unary` | ~1-2ms | Simplicity, debugging |
+| **Server streaming** | `server_streaming` | ~0.5-1ms | Middle ground |
+| **Bidirectional** | `bidi_streaming` | ~50-100us (same machine) | Production, lowest latency |
+
+For co-located hardware, use Unix domain sockets:
+
+```bash
+python my_qrng_server.py --address unix:///var/run/qrng.sock
+export QR_GRPC_SERVER_ADDRESS=unix:///var/run/qrng.sock
+export QR_GRPC_MODE=bidi_streaming
+```
+
+The gRPC client is **protocol-agnostic**. It uses configurable method paths and generic protobuf wire-format encoding. The only requirement is that your proto puts the byte count as field 1 in the request and the random bytes as field 1 in the response. Configure custom protos via `QR_GRPC_METHOD_PATH` and `QR_GRPC_STREAM_METHOD_PATH`.
+
+#### Circuit breaker
+
+The gRPC client includes an adaptive circuit breaker:
+
+- Tracks rolling P99 latency over the last 100 requests
+- Sets timeout to `max(5ms, P99 * 1.5)` (configurable via `QR_CB_*` env vars)
+- Opens after 3 consecutive failures, enters half-open state after 10s
+- Falls back to `QR_FALLBACK_MODE` when the circuit is open
+
+### OpenEntropy
+
+[OpenEntropy](https://github.com/amenti-labs/openentropy) harvests entropy from 63 hardware noise sources on the local machine — thermal sensors, CPU timing jitter, memory timing, GPU scheduling, and more. No network, no API keys, no gRPC server needed.
+
+```bash
+pip install openentropy
+export QR_ENTROPY_SOURCE_TYPE=openentropy
+export QR_OE_CONDITIONING=raw   # raw (research default) | vonneumann | sha256
+```
+
+List available sources on your machine:
+
+```python
+from openentropy import detect_available_sources
+print([s["name"] for s in detect_available_sources()])
+```
+
+### Fallback behavior
+
+The `FallbackEntropySource` wraps a primary source with an automatic fallback:
+
+- Only catches `EntropyUnavailableError` — other exceptions propagate
+- Logs a warning when fallback is used
+- Exposes `last_source_used` for diagnostics
+
+Configure with `QR_FALLBACK_MODE`:
+- `system` — fall back to `os.urandom()` (default)
+- `mock_uniform` — fall back to the mock source
+- `error` — raise immediately, no fallback
+
+### Third-party entropy sources
+
+Any Python package can register entropy sources via entry points:
+
+```toml
+# In your package's pyproject.toml
+[project.entry-points."qr_sampler.entropy_sources"]
+lava_lamp = "my_package:LavaLampEntropySource"
+```
+
+The source is auto-discovered when qr-sampler starts. See [Setting up your own entropy source](#setting-up-your-own-entropy-source) below.
+
+---
+
+## Signal amplification
+
+The signal amplification system converts raw entropy bytes into a single uniform float `u` in `(0, 1)` that drives token selection from the CDF.
+
+### Z-score mean (`zscore_mean`) — default
+
+1. Interprets raw bytes as uint8 values
+2. Computes the sample mean M
+3. Derives SEM = `population_std / sqrt(N)` (never stored — always computed)
+4. Computes z-score: `z = (M - population_mean) / SEM`
+5. Maps to uniform via normal CDF: `u = 0.5 * (1 + erf(z / sqrt(2)))`
+6. Clamps to `(epsilon, 1-epsilon)`
+
+Under the null hypothesis (no bias), `u` is uniformly distributed on (0, 1). A small per-byte bias accumulates over thousands of samples, producing a detectable shift:
+
+```
+20,480 bytes with +0.003 mean bias per byte:
+  M ~ 127.56, SEM ~ 0.514, z ~ 0.12, u ~ 0.548
+```
+
+### ECDF (`ecdf`)
+
+Empirical CDF amplifier with online calibration. Maps raw bytes to uniform via a calibrated empirical distribution function. Does not assume a specific input distribution — it calibrates from observed data.
+
+---
+
+## Temperature strategies
+
+### Fixed temperature (`fixed`)
+
+Returns a constant temperature for every token. Set via `QR_FIXED_TEMPERATURE` (default: 0.7).
+
+### Entropy-dependent temperature (`edt`)
+
+Dynamically adjusts temperature based on the Shannon entropy of the logit distribution:
+
+```
+H_norm = H / ln(vocab_size)         # Normalized entropy [0, 1]
+T = base_temp * H_norm^exponent     # Power-law scaling
+T = clamp(T, min_temp, max_temp)    # Bounds enforcement
+```
+
+High-entropy (uncertain) distributions get higher temperatures; low-entropy (confident) distributions get lower temperatures. This creates a feedback loop where the model's own uncertainty calibrates the randomness of selection.
+
+---
+
+## Per-request parameter overrides
 
 Override sampling parameters on individual requests via `extra_args`:
 
@@ -200,28 +423,30 @@ curl http://localhost:8000/v1/completions \
       "qr_temperature_strategy": "edt",
       "qr_top_k": 100,
       "qr_top_p": 0.95,
+      "qr_sample_count": 40960,
       "qr_diagnostic_mode": true
     }
   }'
 ```
 
+Infrastructure fields (`QR_GRPC_SERVER_ADDRESS`, `QR_FALLBACK_MODE`, etc.) cannot be overridden per-request — they are set at server startup.
+
 ---
 
 ## Web UI
 
-qr-sampler works with [Open WebUI](https://github.com/open-webui/open-webui), a
-self-hosted ChatGPT-style interface that connects to vLLM's OpenAI-compatible
-API.
+qr-sampler works with [Open WebUI](https://github.com/open-webui/open-webui), a self-hosted ChatGPT-style interface that connects to vLLM's OpenAI-compatible API.
 
-**NVIDIA / Linux:** Every deployment profile includes Open WebUI as an optional service — add
-`--profile ui` to start it alongside vLLM:
+**Docker (NVIDIA / Linux):** The `qr-sampler build` command includes Open WebUI in the generated Compose file:
 
 ```bash
-cd deployments/urandom
-docker compose --profile ui up --build
+qr-sampler build --engine vllm --entropy quantum_grpc --output ./deploy
+cd deploy
+docker compose up --build
+# Open http://localhost:3000
 ```
 
-**Apple Silicon:** The deployment profiles use NVIDIA GPU images, but Open WebUI itself is just a web app. Run it standalone in Docker and point it at your vllm-metal server:
+**Apple Silicon:** Run Open WebUI standalone in Docker, pointing at your vllm-metal server:
 
 ```bash
 docker run -d -p 3000:8080 \
@@ -233,15 +458,9 @@ docker run -d -p 3000:8080 \
   ghcr.io/open-webui/open-webui:main
 ```
 
-Then open http://localhost:3000 to start chatting.
-
 ### Controlling qr-sampler from the UI
 
-A pre-built [filter function](examples/open-webui/) injects qr-sampler
-per-request parameters into every chat message via the Open WebUI Valves system.
-This lets you adjust temperature, top-k, top-p, sample count, and other sampling
-parameters from the admin panel without editing environment variables or writing
-API calls.
+A pre-built [filter function](examples/open-webui/) injects qr-sampler per-request parameters into every chat message via the Open WebUI Valves system. This lets you adjust temperature, top-k, top-p, sample count, and other sampling parameters from the admin panel.
 
 To set it up:
 
@@ -250,11 +469,9 @@ To set it up:
 3. Toggle the function to **Global**.
 4. Click the **gear icon** to adjust parameters.
 
-See [`examples/open-webui/README.md`](examples/open-webui/README.md) for the
-full guide, including all available Valve parameters and how the filter works.
+See [`examples/open-webui/README.md`](examples/open-webui/README.md) for the full guide.
 
-> Open WebUI is entirely optional. qr-sampler works the same way with direct API
-> calls, `curl`, Python clients, or any OpenAI-compatible tool.
+> Open WebUI is entirely optional. qr-sampler works the same way with direct API calls, `curl`, Python clients, or any OpenAI-compatible tool.
 
 ---
 
@@ -306,221 +523,13 @@ You can also use a `.env` file — pydantic-settings loads it automatically.
 
 ---
 
-## gRPC transport modes
-
-qr-sampler supports three gRPC transport modes for communicating with entropy servers. All modes satisfy the just-in-time constraint — entropy is generated only when requested.
-
-| Mode | `QR_GRPC_MODE` | Latency | Best for |
-|---|---|---|---|
-| **Unary** | `unary` | ~1-2ms overhead per call | Simplicity, debugging, low-frequency sampling |
-| **Server streaming** | `server_streaming` | ~0.5-1ms | Middle ground |
-| **Bidirectional** | `bidi_streaming` | ~50-100us (same machine) | Production, lowest latency |
-
-For co-located hardware, use Unix domain sockets for the lowest possible latency:
-
-**(macOS / Linux):**
-
-```bash
-# Server
-python simple_urandom_server.py --address unix:///var/run/qrng.sock
-
-# Client config
-export QR_GRPC_SERVER_ADDRESS=unix:///var/run/qrng.sock
-export QR_GRPC_MODE=bidi_streaming
-```
-
-### Circuit breaker
-
-The gRPC client includes an adaptive circuit breaker (all thresholds configurable via `QR_CB_*` environment variables):
-
-- Tracks rolling P99 latency over the last `QR_CB_WINDOW_SIZE` requests (default: 100)
-- Sets timeout to `max(QR_CB_MIN_TIMEOUT_MS, P99 * QR_CB_TIMEOUT_MULTIPLIER)` or the configured timeout, whichever is lower
-- Opens the circuit after `QR_CB_MAX_CONSECUTIVE_FAILURES` consecutive failures (default: 3)
-- Enters half-open state after `QR_CB_RECOVERY_WINDOW_S` seconds (default: 10), allowing one test request
-- Falls back to the configured fallback source (`QR_FALLBACK_MODE`) when the circuit is open
-
-All fallback-sourced entropy is flagged in diagnostic logs so downstream analysis can account for it.
-
----
-
-## Entropy sources
-
-### Built-in sources
-
-| Source | Identifier | Description |
-|---|---|---|
-| **Quantum gRPC** | `quantum_grpc` | Remote entropy server via gRPC (any protocol) |
-| **System** | `system` | `os.urandom()` — OS cryptographic RNG (fallback/testing) |
-| **Timing noise** | `timing_noise` | CPU timing jitter (experimental) |
-| **Mock uniform** | `mock_uniform` | Configurable test source with seed/bias |
-| **OpenEntropy** | `openentropy` | 63 hardware noise sources (thermal, timing, microarch, GPU) — local, no network |
-
-### Fallback behavior
-
-The `FallbackEntropySource` wraps a primary source with an automatic fallback:
-
-- Only catches `EntropyUnavailableError` — other exceptions propagate
-- Logs a warning when fallback is used
-- Exposes `last_source_used` for diagnostics
-
-Configure with `QR_FALLBACK_MODE`:
-- `system` — fall back to `os.urandom()` (default)
-- `mock_uniform` — fall back to the mock source
-- `error` — raise immediately, no fallback
-
-### OpenEntropy
-
-[OpenEntropy](https://github.com/amenti-labs/openentropy) harvests entropy from 63 hardware noise sources on the local machine — thermal sensors, CPU timing jitter, memory timing, GPU scheduling, and more. No network, no API keys, no gRPC server needed.
-
-Install:
-
-```bash
-pip install openentropy
-```
-
-Configure:
-
-```bash
-export QR_ENTROPY_SOURCE_TYPE=openentropy
-export QR_OE_CONDITIONING=raw   # raw (research default) | vonneumann | sha256
-```
-
-List available sources on your machine:
-
-```python
-from openentropy import detect_available_sources
-print([s["name"] for s in detect_available_sources()])
-```
-
-To sample from specific sources only, set `QR_OE_SOURCES` to a comma-separated list:
-
-```bash
-export QR_OE_SOURCES=clock_jitter,dram_row_buffer
-```
-
-See [`deployments/openentropy/`](deployments/openentropy/) for the full deployment profile.
-
-### Third-party entropy sources
-
-Any Python package can register entropy sources via entry points:
-
-```toml
-# In your package's pyproject.toml
-[project.entry-points."qr_sampler.entropy_sources"]
-lava_lamp = "my_package:LavaLampEntropySource"
-```
-
-The source will be auto-discovered when qr-sampler starts. See [Setting up your own entropy source](#setting-up-your-own-entropy-source) below.
-
----
-
-## Signal amplification
-
-The signal amplification system converts raw entropy bytes into a single uniform float `u` in `(0, 1)` that drives token selection from the CDF. The default `zscore_mean` amplifier:
-
-1. Interprets raw bytes as uint8 values
-2. Computes the sample mean M
-3. Derives SEM = `population_std / sqrt(N)` (never stored — always computed)
-4. Computes z-score: `z = (M - population_mean) / SEM`
-5. Maps to uniform via normal CDF: `u = 0.5 * (1 + erf(z / sqrt(2)))`
-6. Clamps to `(epsilon, 1-epsilon)`
-
-Under the null hypothesis (no bias), `u` is uniformly distributed on (0, 1). A small per-byte bias accumulates over thousands of samples, producing a detectable shift:
-
-```
-20,480 bytes with +0.003 mean bias per byte:
-  M ~ 127.56, SEM ~ 0.514, z ~ 0.12, u ~ 0.548
-```
-
-This makes even tiny biases statistically observable while maintaining a well-defined distribution for token selection.
-
----
-
-## Temperature strategies
-
-### Fixed temperature (`fixed`)
-
-Returns a constant temperature for every token. Set via `QR_FIXED_TEMPERATURE`.
-
-### Entropy-dependent temperature (`edt`)
-
-Dynamically adjusts temperature based on the Shannon entropy of the logit distribution:
-
-```
-H_norm = H / ln(vocab_size)         # Normalized entropy [0, 1]
-T = base_temp * H_norm^exponent     # Power-law scaling
-T = clamp(T, min_temp, max_temp)    # Bounds enforcement
-```
-
-High-entropy (uncertain) distributions get higher temperatures; low-entropy (confident) distributions get lower temperatures. This creates a feedback loop where the model's own uncertainty calibrates the randomness of selection.
-
----
-
-## Deployment profiles
-
-Each entropy source has a self-contained deployment profile under `deployments/`. A profile contains everything needed to run vLLM with that entropy source:
-
-- **`docker-compose.yml`** — Self-contained compose file with all services and environment variables.
-- **`.env.example`** — Annotated template. Copy to `.env` and customize.
-- **`README.md`** — Setup guide specific to this entropy source.
-
-```
-deployments/
-├── README.md                      # Overview and guide for creating profiles
-├── .gitignore                     # Excludes .env files with secrets
-├── _template/                     # Copy this to create your own profile
-│   ├── docker-compose.yml         # Annotated compose template
-│   ├── .env.example               # All available settings documented
-│   └── README.md                  # How to customize
-├── urandom/                       # os.urandom() via gRPC (start here)
-│   ├── docker-compose.yml         # vLLM + entropy-server (self-contained)
-│   ├── .env.example               # Defaults for urandom setup
-│   └── README.md                  # 3-step quickstart
-└── firefly-1/                     # External QRNG with API key auth
-    ├── docker-compose.yml         # vLLM only (QRNG server is external)
-    ├── .env.example               # Sanitized — no real API key
-    └── README.md                  # Server details, rate limits
-```
-
-To get started:
-
-```bash
-cd deployments/urandom
-cp .env.example .env
-docker compose up --build
-```
-
-To create a profile for your own hardware:
-
-```bash
-cp -r deployments/_template deployments/my-server
-# Edit .env.example → .env, customize docker-compose.yml
-cd deployments/my-server
-docker compose up --build
-```
-
-See [deployments/README.md](deployments/README.md) for the full guide.
-
-### Protocol flexibility
-
-qr-sampler's gRPC client is **protocol-agnostic**. It does not require your server to implement a specific `.proto` — it uses configurable method paths and generic protobuf wire-format encoding. The only requirement is that your proto puts the byte count as field 1 in the request and the random bytes as field 1 in the response. This covers the built-in `qr_entropy.EntropyService` protocol and any server with the same field layout (e.g., `qrng.QuantumRNG`).
-
-Configure via:
-- `QR_GRPC_METHOD_PATH` — the unary RPC method (e.g., `/qrng.QuantumRNG/GetRandomBytes`)
-- `QR_GRPC_STREAM_METHOD_PATH` — the streaming RPC method (empty to disable streaming)
-- `QR_GRPC_API_KEY` / `QR_GRPC_API_KEY_HEADER` — authentication via gRPC metadata
-
-The API key is never logged. Health checks report only `"authenticated": true/false`.
-
----
-
 ## Setting up your own entropy source
 
-qr-sampler is designed to connect *any* randomness source to LLM token sampling. This section walks through connecting your own hardware.
+qr-sampler is designed to connect *any* randomness source to LLM token sampling. There are two approaches.
 
 ### Approach A: gRPC server (recommended)
 
-The simplest path — implement a gRPC server. You can use the built-in `qr_entropy.EntropyService` protocol (example servers provided), or your own proto as long as field 1 carries the byte count (request) and random bytes (response).
+Implement a gRPC server. You can use the built-in `qr_entropy.EntropyService` protocol (example servers provided), or your own proto as long as field 1 carries the byte count (request) and random bytes (response).
 
 #### 5-minute walkthrough
 
@@ -535,7 +544,6 @@ cp examples/servers/qrng_template_server.py my_qrng_server.py
 ```python
 class QRNGHardware:
     def __init__(self, device_path="/dev/qrng0"):
-        # Open your hardware connection
         self._device = open(device_path, "rb")
 
     def generate(self, n_bytes: int) -> bytes:
@@ -554,15 +562,15 @@ pip install qr-sampler
 python my_qrng_server.py --port 50051
 ```
 
-4. **Create a deployment profile** and launch with Docker:
+4. **Deploy with Docker:**
 
 ```bash
-cp -r deployments/_template deployments/my-qrng
-# Edit deployments/my-qrng/.env:
-#   QR_ENTROPY_SOURCE_TYPE=quantum_grpc
-#   QR_GRPC_SERVER_ADDRESS=<your-server>:50051
-cd deployments/my-qrng
-cp .env.example .env
+# Generate deployment files
+qr-sampler build --engine vllm --entropy quantum_grpc --output ./deploy
+
+# Configure the gRPC address
+cd deploy
+# Edit .env: QR_GRPC_SERVER_ADDRESS=<your-server>:50051
 docker compose up --build
 ```
 
@@ -577,8 +585,6 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct --dtype half --max-model-len 8096 --gpu-me
 The template handles all gRPC boilerplate (unary + bidirectional streaming, health checks, graceful shutdown). You only write the hardware-specific code.
 
 #### The gRPC protocol
-
-The proto definition is minimal:
 
 ```protobuf
 service EntropyService {
@@ -603,40 +609,25 @@ Any language that supports gRPC can implement this server — Python, C++, Rust,
 
 #### Just-in-time constraint
 
-The entropy must be generated **after** the client sends the request, not from a pre-generated pool. This means:
+The entropy must be generated **after** the client sends the request, not from a pre-generated pool:
 
 - No buffering or caching of previously generated bytes
-- The physical quantum measurement (or other random process) happens during the `generate()` call
+- The physical measurement happens during the `generate()` call
 - `generation_timestamp_ns` in the response proves freshness
 
 This is critical for consciousness-research applications where the timing relationship between logit computation and entropy generation matters.
 
 #### Deployment options
 
-**Docker (recommended):**
-
-```bash
-cp -r deployments/_template deployments/my-server
-# Edit docker-compose.yml to add your entropy server container
-# Edit .env.example → .env with your configuration
-cd deployments/my-server
-docker compose up --build
-```
-
 **systemd (Linux):**
 
 ```bash
-# Copy and edit the service file
 sudo cp examples/systemd/qr-entropy-server.service /etc/systemd/system/
 sudo cp examples/systemd/qr-entropy-server.env /etc/default/qr-entropy-server
-
-# Edit the env file with your configuration
 sudo systemctl enable --now qr-entropy-server
 ```
 
 **Unix domain sockets** (lowest latency for co-located hardware):
-
-**(macOS / Linux):**
 
 ```bash
 python my_qrng_server.py --address unix:///var/run/qrng.sock
@@ -662,7 +653,6 @@ class MyEntropySource(EntropySource):
         return True
 
     def get_random_bytes(self, n: int) -> bytes:
-        # Your entropy generation logic here
         return my_hardware.read(n)
 
     def close(self) -> None:
@@ -680,10 +670,9 @@ Then set `QR_ENTROPY_SOURCE_TYPE=my_source`.
 
 ### Validation
 
-Test your entropy server with the built-in test infrastructure:
+Test your entropy source:
 
 ```python
-# In a test file
 from qr_sampler.entropy.quantum import QuantumGrpcSource
 from qr_sampler.config import QRSamplerConfig
 
@@ -727,12 +716,15 @@ qr-sampler uses a registry + entry-points pattern for extensibility:
 
 ```
 qr_sampler.entropy_sources          Third-party entropy sources
+qr_sampler.engine_adapters          Third-party engine adapters
 vllm.logits_processors              vLLM plugin registration
 ```
 
-Each subsystem (entropy, amplification, temperature) has its own registry with decorator-based registration for built-in implementations and entry-point discovery for third-party extensions. The processor never instantiates strategy classes directly — it always goes through the registry.
+Each subsystem (entropy, amplification, temperature, engines) has its own registry with decorator-based registration for built-in implementations and entry-point discovery for third-party extensions. The pipeline never instantiates strategy classes directly — it always goes through the registry.
 
 ### Adding new components
+
+**New engine adapter:** Subclass `EngineAdapter`, implement `get_pipeline()`. Register with `@EngineAdapterRegistry.register("name")`. Add entry point under `qr_sampler.engine_adapters`.
 
 **New entropy source:** Subclass `EntropySource`, implement `name`, `is_available`, `get_random_bytes()`, `close()`. Register with `@register_entropy_source("name")`.
 
@@ -749,69 +741,73 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development instructions.
 ```
 src/qr_sampler/
 ├── __init__.py                    # Package version, re-exports
+├── __main__.py                    # CLI entry: python -m qr_sampler
 ├── config.py                      # Pydantic-settings configuration
 ├── exceptions.py                  # Exception hierarchy
-├── processor.py                   # vLLM V1 LogitsProcessor (orchestrates pipeline)
+├── processor.py                   # Backward compat: re-exports VLLMAdapter
 ├── py.typed                       # PEP 561 type hint marker
+├── core/                          # Engine-agnostic pipeline (NO torch)
+│   ├── pipeline.py                # SamplingPipeline + factory functions
+│   └── types.py                   # SamplingResult frozen dataclass
+├── engines/                       # Engine adapter layer
+│   ├── base.py                    # EngineAdapter ABC
+│   ├── registry.py                # EngineAdapterRegistry
+│   └── vllm.py                    # VLLMAdapter: vLLM V1 LogitsProcessor
+├── profiles/                      # Declarative YAML metadata
+│   ├── schema.py                  # Pydantic validation models
+│   ├── loader.py                  # Profile discovery + loading
+│   ├── compatibility.py           # Tri-state compatibility checker
+│   ├── engines/                   # Engine profiles (vllm, vllm_metal)
+│   ├── entropy/                   # Entropy profiles (system, quantum_grpc, ...)
+│   ├── amplifiers/                # Amplifier profiles (zscore_mean, ecdf)
+│   └── samplers/                  # Sampler profiles (fixed, edt)
+├── cli/                           # CLI commands (requires [cli] extra)
+│   ├── main.py                    # Click group
+│   ├── validate_cmd.py            # qr-sampler validate
+│   ├── build_cmd.py               # qr-sampler build
+│   ├── list_cmd.py                # qr-sampler list
+│   └── info_cmd.py                # qr-sampler info
+├── templates/                     # Jinja2 templates for qr-sampler build
+│   ├── docker-compose.yml.j2
+│   └── env.j2
 ├── amplification/
 │   ├── base.py                    # SignalAmplifier ABC, AmplificationResult
 │   ├── registry.py                # AmplifierRegistry
-│   └── zscore.py                  # Z-score mean amplifier
+│   ├── zscore.py                  # Z-score mean amplifier
+│   └── ecdf.py                    # ECDF amplifier
 ├── entropy/
 │   ├── base.py                    # EntropySource ABC
 │   ├── registry.py                # Auto-discovery registry + entry points
-│   ├── quantum.py                 # gRPC QRNG source (3 transport modes)
-│   ├── system.py                  # os.urandom() source
-│   ├── timing.py                  # CPU timing jitter source
+│   ├── quantum.py                 # gRPC QRNG (3 transport modes, circuit breaker)
+│   ├── system.py                  # os.urandom()
+│   ├── timing.py                  # CPU timing jitter (experimental)
 │   ├── mock.py                    # Configurable test source
-│   └── fallback.py                # Fallback wrapper
+│   ├── fallback.py                # Fallback composition wrapper
+│   └── openentropy.py             # OpenEntropy integration
 ├── logging/
-│   ├── types.py                   # TokenSamplingRecord dataclass
+│   ├── types.py                   # TokenSamplingRecord (frozen, __slots__)
 │   └── logger.py                  # SamplingLogger (none/summary/full)
 ├── proto/
 │   ├── entropy_service.proto      # gRPC protocol definition
 │   ├── entropy_service_pb2.py     # Hand-written protobuf stubs
-│   └── entropy_service_pb2_grpc.py # Hand-written gRPC stubs
+│   └── entropy_service_pb2_grpc.py
 ├── selection/
 │   ├── types.py                   # SelectionResult dataclass
 │   └── selector.py                # CDF-based token selector
 └── temperature/
     ├── base.py                    # TemperatureStrategy ABC, Shannon entropy
     ├── registry.py                # TemperatureStrategyRegistry
-    ├── fixed.py                   # Fixed temperature strategy
+    ├── fixed.py                   # Fixed temperature
     └── edt.py                     # Entropy-dependent temperature
 
 examples/
-├── servers/
-│   ├── simple_urandom_server.py   # Minimal reference server (~50 lines)
-│   ├── timing_noise_server.py     # CPU timing entropy server
+├── servers/                       # Example entropy servers
+│   ├── simple_urandom_server.py   # Minimal reference (~50 lines)
+│   ├── timing_noise_server.py     # CPU timing jitter
 │   └── qrng_template_server.py    # Annotated template for custom QRNGs
-├── open-webui/
-│   ├── qr_sampler_filter.py       # Open WebUI filter function (source)
-│   ├── qr_sampler_filter.json     # Open WebUI importable JSON
-│   └── README.md                  # Filter function docs
-├── docker/
-│   ├── Dockerfile.vllm            # vLLM + qr-sampler image (build-time install)
-│   └── Dockerfile.entropy-server  # Docker image for entropy servers
-└── systemd/
-    ├── qr-entropy-server.service  # systemd unit file
-    └── qr-entropy-server.env      # Environment file
-
-deployments/
-├── README.md                      # Overview, how to create profiles
-├── .gitignore                     # Excludes .env files with secrets
-├── _template/                     # Copy this to create a new profile
-│   ├── docker-compose.yml         # Annotated compose template
-│   ├── .env.example               # All settings documented
-│   └── README.md                  # How to customize
-├── urandom/                       # os.urandom() via gRPC (start here)
-│   ├── docker-compose.yml         # vLLM + entropy-server (self-contained)
-│   ├── .env.example               # Defaults for urandom setup
-│   └── README.md                  # Setup guide
-└── firefly-1/                     # External QRNG with API key auth
-    ├── docker-compose.yml         # vLLM only (QRNG server is external)
-    ├── .env.example               # Sanitized — no real API key
-    └── README.md                  # Server details, rate limits
+├── open-webui/                    # Open WebUI filter function
+├── docker/                        # Dockerfiles
+└── systemd/                       # systemd unit files
 ```
 
 ---
@@ -820,11 +816,9 @@ deployments/
 
 qr-sampler includes statistical tests (in `tests/test_statistical_properties.py`, requires `scipy`) that validate the mathematical properties of the sampling pipeline:
 
-- **KS-test for u-value uniformity**: Under the null hypothesis (no bias), amplified `u` values should be uniformly distributed on (0, 1). The test runs a Kolmogorov-Smirnov test against a uniform reference distribution.
-- **Bias detection**: Verifies that introducing a small per-byte mean shift (e.g., `mean=128.0` instead of `127.5`) produces a statistically detectable shift in the `u` distribution — confirming the amplification system is sensitive enough for consciousness-research experiments.
-- **EDT monotonicity**: Validates that the entropy-dependent temperature strategy produces higher temperatures for higher-entropy logit distributions, as designed.
-
-These tests run as part of the standard test suite:
+- **KS-test for u-value uniformity**: Under the null hypothesis (no bias), amplified `u` values should be uniformly distributed on (0, 1).
+- **Bias detection**: Verifies that a small per-byte mean shift produces a statistically detectable shift in the `u` distribution — confirming the amplification system is sensitive enough for consciousness-research experiments.
+- **EDT monotonicity**: Validates that the entropy-dependent temperature strategy produces higher temperatures for higher-entropy logit distributions.
 
 ```bash
 pytest tests/test_statistical_properties.py -v
@@ -835,9 +829,8 @@ pytest tests/test_statistical_properties.py -v
 ## Development
 
 ```bash
-# Clone and install
-git clone https://github.com/alchemystack/Quantum-random-vLLM-sampler.git
-cd Quantum-random-vLLM-sampler
+git clone https://github.com/alchemystack/qr-sampler.git
+cd qr-sampler
 pip install -e ".[dev]"
 
 # Run tests

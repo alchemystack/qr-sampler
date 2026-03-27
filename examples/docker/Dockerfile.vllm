@@ -5,17 +5,17 @@
 # by vLLM via the vllm.logits_processors entry point.
 #
 # Build (from repo root):
-#   docker build -f examples/docker/Dockerfile.vllm -t qr-vllm .
+#   docker build -f examples/docker/Dockerfile.vllm -t qr-sampler-vllm .
 #
-# Run with a deployment profile (recommended):
-#   cd deployments/urandom
-#   docker compose up --build
+# Run with `qr-sampler build` (recommended):
+#   qr-sampler build --engine vllm --entropy quantum_grpc --output ./deploy
+#   cd deploy && docker compose up --build
 #
 # Run standalone (system entropy fallback):
 #   docker run --gpus 1 -p 8000:8000 \
 #     -e HF_MODEL=Qwen/Qwen2.5-1.5B-Instruct \
 #     -e HF_TOKEN=<your-token> \
-#     qr-vllm
+#     qr-sampler-vllm
 
 FROM vllm/vllm-openai:latest
 

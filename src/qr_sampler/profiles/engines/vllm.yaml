@@ -1,0 +1,53 @@
+id: vllm
+name: "vLLM (NVIDIA GPU)"
+description: |
+  Standard vLLM inference engine for NVIDIA GPUs (Linux).
+
+  vLLM is a high-throughput LLM serving engine that uses PagedAttention for
+  efficient memory management. qr-sampler integrates as a LogitsProcessor
+  plugin via the vllm.logits_processors entry point -- no source code
+  modifications needed.
+
+  Requirements:
+    - Linux (Ubuntu 22.04+ recommended)
+    - NVIDIA GPU with CUDA support (Ampere or newer recommended)
+    - NVIDIA Container Toolkit (for Docker deployments)
+    - vLLM v0.6.0 or later (V1 engine architecture)
+
+  Quick start (Docker):
+    qr-sampler build --engine vllm --entropy system --output ./deploy
+    cd deploy && docker compose up --build
+
+  Quick start (bare-metal):
+    pip install qr-sampler
+    vllm serve Qwen/Qwen2.5-1.5B-Instruct --dtype half --max-model-len 8192
+
+  The VLLMAdapter converts torch logit tensors to numpy for the core pipeline,
+  then writes the one-hot result back into the torch tensor. This is a thin
+  wrapper -- all sampling math lives in qr_sampler.core.pipeline.
+
+adapter: "qr_sampler.engines.vllm:VLLMAdapter"
+entry_point_group: "vllm.logits_processors"
+
+platform:
+  os: [linux]
+  accelerator: [nvidia]
+
+dependencies:
+  - vllm
+
+docker:
+  base_image: "vllm/vllm-openai:latest"
+  dockerfile: "examples/docker/Dockerfile.vllm"
+
+defaults:
+  dtype: half
+  max_model_len: 8192
+  gpu_memory_utilization: 0.80
+
+known_working_models:
+  - "Qwen/Qwen2.5-1.5B-Instruct"
+  - "Qwen/Qwen2.5-7B-Instruct"
+  - "meta-llama/Llama-3.1-8B-Instruct"
+
+known_incompatible_models: []

@@ -1,0 +1,60 @@
+id: quantum_grpc
+name: "Quantum gRPC"
+description: |
+  Remote entropy server via gRPC. Supports unary, server streaming, and
+  bidirectional streaming transport modes.
+
+  This is the primary source for connecting quantum random number generators
+  (QRNGs) and other hardware entropy devices. The gRPC client is protocol-
+  agnostic -- it uses configurable method paths and generic protobuf wire-format
+  encoding, so it works with the built-in qr_entropy.EntropyService protocol
+  and any server whose proto puts the byte count as field 1 in the request and
+  random bytes as field 1 in the response.
+
+  Quick start:
+    # Terminal 1: Start an example entropy server
+    python examples/servers/simple_urandom_server.py --address 0.0.0.0:50051
+
+    # Terminal 2: Configure qr-sampler to use it
+    export QR_ENTROPY_SOURCE_TYPE=quantum_grpc
+    export QR_GRPC_SERVER_ADDRESS=localhost:50051
+    vllm serve Qwen/Qwen2.5-1.5B-Instruct
+
+  Docker deployment:
+    qr-sampler build --engine vllm --entropy quantum_grpc --output ./deploy
+    cd deploy && docker compose up --build
+
+  Transport modes (QR_GRPC_MODE):
+    unary            -- One HTTP/2 stream per call (~1-2ms overhead). Default.
+    server_streaming -- Short-lived stream (~0.5-1ms). Middle ground.
+    bidi_streaming   -- Persistent stream (~50-100us same-machine). Production.
+
+  For lowest latency with co-located hardware, use Unix domain sockets:
+    QR_GRPC_SERVER_ADDRESS=unix:///var/run/qrng.sock
+    QR_GRPC_MODE=bidi_streaming
+
+  Custom gRPC servers:
+    Copy examples/servers/qrng_template_server.py and implement the
+    QRNGHardware.generate() method with your device-specific code.
+    The template handles all gRPC boilerplate, health checks, and shutdown.
+
+  Circuit breaker:
+    Tracks rolling P99 latency, opens after 3 consecutive failures, enters
+    half-open state after 10s. All thresholds configurable via QR_CB_* env vars.
+
+source_class: "qr_sampler.entropy.quantum:QuantumGrpcSource"
+transport: grpc
+
+dependencies:
+  - grpcio
+  - protobuf
+
+compatible_amplifiers:
+  - zscore_mean
+  - ecdf
+
+known_incompatible_amplifiers: []
+
+defaults:
+  sample_count: 20480
+  grpc_mode: unary

@@ -1,0 +1,55 @@
+id: vllm_metal
+name: "vLLM (Apple Silicon / Metal)"
+description: |
+  vLLM with Metal GPU backend for Apple Silicon Macs (M1/M2/M3/M4).
+
+  vllm-metal is a community-maintained vLLM plugin under the official
+  vllm-project GitHub org. It uses MLX under the hood but exposes the same
+  vLLM API and plugin system -- same entry points, same OpenAI-compatible
+  endpoints, same curl commands as NVIDIA vLLM.
+
+  Requirements:
+    - macOS 14+ (Sonoma or later recommended)
+    - Apple Silicon (M1, M2, M3, M4 -- any variant)
+    - Python 3.12+ (required by vllm-metal)
+    - No Docker support -- must run natively (Docker on macOS has no Metal
+      GPU passthrough, so the inference server runs on CPU)
+
+  Install:
+    curl -fsSL https://raw.githubusercontent.com/vllm-project/vllm-metal/main/install.sh | bash
+    source ~/.venv-vllm-metal/bin/activate
+    pip install qr-sampler
+
+  Run:
+    source ~/.venv-vllm-metal/bin/activate
+    vllm serve mlx-community/Qwen3-0.6B-4bit
+
+  Models:
+    Use MLX-format models from the mlx-community collection on Hugging Face
+    (https://huggingface.co/mlx-community). These are pre-converted and
+    quantized for Apple Silicon. Pick a model that fits your available
+    unified memory.
+
+  Note: vllm-metal currently requires a patch to load custom logits processors.
+  See https://github.com/vllm-project/vllm-metal/pull/124 for the fix.
+
+adapter: "qr_sampler.engines.vllm:VLLMAdapter"
+entry_point_group: "vllm.logits_processors"
+
+platform:
+  os: [darwin]
+  accelerator: [apple_silicon]
+
+dependencies:
+  - vllm
+
+docker: {}
+
+defaults:
+  dtype: half
+  max_model_len: 4096
+
+known_working_models:
+  - "Qwen/Qwen2.5-1.5B-Instruct"
+
+known_incompatible_models: []
