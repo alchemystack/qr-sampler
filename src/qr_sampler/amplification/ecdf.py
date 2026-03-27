@@ -126,9 +126,11 @@ class ECDFAmplifier(SignalAmplifier):
         sample_mean = float(np.frombuffer(raw_bytes, dtype=np.uint8).mean())
 
         # Binary search in the sorted calibration means.
-        # _sorted_means is guaranteed non-None here because _calibrated is True.
-        rank = int(np.searchsorted(self._sorted_means, sample_mean, side="right"))  # type: ignore[arg-type]
-        n = len(self._sorted_means)  # type: ignore[arg-type]
+        sorted_means = self._sorted_means
+        if sorted_means is None:
+            raise SignalAmplificationError("Calibration data missing")
+        rank = int(np.searchsorted(sorted_means, sample_mean, side="right"))
+        n = len(sorted_means)
 
         # Hazen plotting position: u = (rank + 1) / (N + 1).
         u = (rank + 1) / (n + 1)
