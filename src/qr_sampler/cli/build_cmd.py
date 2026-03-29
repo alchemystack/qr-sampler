@@ -81,7 +81,7 @@ def _render_template(template_name: str, context: dict[str, Any]) -> str:
         Rendered string.
     """
     try:
-        from jinja2 import Environment, FileSystemLoader
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
     except ImportError as exc:
         raise click.ClickException(
             "The 'build' command requires Jinja2. Install with: pip install qr-sampler[cli]"
@@ -90,6 +90,7 @@ def _render_template(template_name: str, context: dict[str, Any]) -> str:
     templates_dir = _resolve_templates_dir()
     env = Environment(
         loader=FileSystemLoader(str(templates_dir)),
+        autoescape=select_autoescape(),
         keep_trailing_newline=True,
         trim_blocks=True,
         lstrip_blocks=True,
