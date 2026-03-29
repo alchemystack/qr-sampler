@@ -139,7 +139,7 @@ curl http://localhost:8000/v1/completions \
 pip install qr-sampler
 
 # Start vLLM — qr-sampler registers automatically via entry points
-vllm serve Qwen/Qwen2.5-1.5B-Instruct --dtype half --max-model-len 8096 --gpu-memory-utilization 0.80
+vllm serve Qwen/Qwen2.5-1.5B-Instruct --dtype half --max-model-len 8192 --gpu-memory-utilization 0.80
 ```
 
 Configure the entropy source via environment variables:
@@ -147,7 +147,7 @@ Configure the entropy source via environment variables:
 ```bash
 export QR_ENTROPY_SOURCE_TYPE=quantum_grpc
 export QR_GRPC_SERVER_ADDRESS=localhost:50051
-vllm serve Qwen/Qwen2.5-1.5B-Instruct --dtype half --max-model-len 8096 --gpu-memory-utilization 0.80
+vllm serve Qwen/Qwen2.5-1.5B-Instruct --dtype half --max-model-len 8192 --gpu-memory-utilization 0.80
 ```
 
 ### Apple Silicon (macOS)
@@ -579,7 +579,7 @@ Or configure directly via environment variables (bare-metal):
 ```bash
 export QR_ENTROPY_SOURCE_TYPE=quantum_grpc
 export QR_GRPC_SERVER_ADDRESS=localhost:50051
-vllm serve Qwen/Qwen2.5-1.5B-Instruct --dtype half --max-model-len 8096 --gpu-memory-utilization 0.80
+vllm serve Qwen/Qwen2.5-1.5B-Instruct --dtype half --max-model-len 8192 --gpu-memory-utilization 0.80
 ```
 
 The template handles all gRPC boilerplate (unary + bidirectional streaming, health checks, graceful shutdown). You only write the hardware-specific code.
